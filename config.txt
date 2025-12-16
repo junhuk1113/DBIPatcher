@@ -1,4 +1,4 @@
-ver=845
+ver=854
 lang=ko
 font=true
 font_num=false
