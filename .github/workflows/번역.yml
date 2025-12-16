@@ -1,0 +1,145 @@
+name: Translate & Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Read config values
+      id: cfg
+      run: |
+        ver=$(grep "^ver=" config.txt | cut -d'=' -f2)
+        lang=$(grep "^lang=" config.txt | cut -d'=' -f2)
+        font=$(grep "^font=" config.txt | cut -d'=' -f2)
+        font_num=$(grep "^font_num=" config.txt | cut -d'=' -f2)
+
+        echo "ver=$ver" >> $GITHUB_OUTPUT
+        echo "lang=$lang" >> $GITHUB_OUTPUT
+        echo "font=$font" >> $GITHUB_OUTPUT
+        echo "font_num=$font_num" >> $GITHUB_OUTPUT
+
+    - name: Detect previous config.txt commit
+      id: history
+      run: |
+        prev=$(git log -n 2 --pretty=format:"%H" -- config.txt | tail -n 1)
+        log=$(git log $prev..HEAD --pretty=format:"- %s" --invert-grep --grep="config.txt")
+        {
+          echo "prev=$prev"
+          echo "log<<EOF"
+          echo "$log"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-pip zstd libzstd-dev
+        pip3 install pillow zstandard
+
+    - name: Build dbipatcher
+      run: make
+
+    - name: Patch DBI files
+      id: patch
+      run: |
+        ver="${{ steps.cfg.outputs.ver }}"
+        lang="${{ steps.cfg.outputs.lang }}"
+
+        # Determine language list
+        if [ "$lang" = "all" ]; then
+            langs=()
+            for f in translate/lang.*.txt; do
+                base=$(basename "$f")
+                code=$(echo "$base" | sed 's/lang.\(.*\)\.txt/\1/')
+                langs+=("$code")
+            done
+        else
+            langs=("$lang")
+        fi
+
+        echo "langs=${langs[@]}" >> $GITHUB_OUTPUT
+
+        mkdir -p patched
+
+        for L in "${langs[@]}"; do
+            mkdir -p "patched/${L}"
+
+            BP="translate/blueprints/blueprint.${ver}.txt"
+            NRO="dbi/DBI.${ver}.ru.nro"
+            LANG_FILE="translate/lang.${L}.txt"
+            OUT="patched/${L}/DBI.nro"
+
+            ./bin/dbipatcher \
+              --patch "$BP" \
+              --nro "$NRO" \
+              --lang "$LANG_FILE" \
+              --out "$OUT"
+        done
+
+    - name: Apply font patch
+      if: ${{ steps.cfg.outputs.font == 'true' }}
+      run: |
+        ver="${{ steps.cfg.outputs.ver }}"
+        lang="${{ steps.cfg.outputs.lang }}"
+
+        # language list
+        if [ "$lang" = "all" ]; then
+            langs=()
+            for f in translate/lang.*.txt; do
+                base=$(basename "$f")
+                code=$(echo "$base" | sed 's/lang.\(.*\)\.txt/\1/')
+                langs+=("$code")
+            done
+        else
+            langs=("$lang")
+        fi
+
+        for L in "${langs[@]}"; do
+            if [ "$L" = "ko" ]; then
+                echo "[FONT] Applying font patch for $L"
+                python3 font/font_patch.py "$L" "patched/${L}/DBI.nro"
+            else
+                echo "[FONT] Skip $L (font patch unsupported)"
+            fi
+        done
+
+    - name: Create release ZIP files
+      run: |
+        ver="${{ steps.cfg.outputs.ver }}"
+        lang="${{ steps.cfg.outputs.lang }}"
+
+        if [ "$lang" = "all" ]; then
+            langs=()
+            for f in translate/lang.*.txt; do
+                base=$(basename "$f")
+                code=$(echo "$base" | sed 's/lang.\(.*\)\.txt/\1/')
+                langs+=("$code")
+            done
+        else
+            langs=("$lang")
+        fi
+
+        mkdir -p release
+
+        for L in "${langs[@]}"; do
+            zip -j "release/DBI_${L}.zip" "patched/${L}/DBI.nro"
+        done
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.cfg.outputs.ver }}
+        name: DBI ${{ steps.cfg.outputs.ver }}
+        body: ${{ steps.history.outputs.log }}
+        files: release/*.zip
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
